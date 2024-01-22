@@ -1,0 +1,251 @@
+# OpenTelemetry & Go
+Open Source Observability for Go
+
+Andrew Wilkins
+Feb 2024
+axw@elastic.co
+
+https://github.com/axw/talks/tree/main/perth_gophers_otel
+
+## Overview
+
+- Intro to Observability
+- Intro to OpenTelemetry
+- Using OpenTelemetry Go
+- Demo: OpenTelemetry + Elastic Cloud
+
+.image elastic_logo.svg
+
+## What is Observability?
+
+> Observability lets us **understand a system from the outside**, by letting us ask questions about that system without knowing its inner workings.
+> Furthermore, it allows us to easily troubleshoot and handle novel problems (i.e. “**unknown unknowns**”), and helps us answer the question, “Why is this happening?”
+>
+> In order to be able to ask those questions of a system, the application must be properly instrumented.
+> That is, the application code must **emit signals such as traces, metrics, and logs**.
+> An application is properly instrumented when developers don’t need to add more instrumentation to troubleshoot an issue,
+> because they have all of the information they need.
+>
+> OpenTelemetry is the mechanism by which application code is instrumented, to help make a system observable.
+
+-- [opentelemetry.io](https://opentelemetry.io/docs/concepts/observability-primer/)
+
+: What deployment changes happened recently?
+: What anomalous events have occurred recently?
+: Which attributes are highly correlated with failing or slow HTTP requests?
+: Which microservices are on the critical path for my latency-sensitive application?
+: Where is all the CPU being spent in my Kubernetes cluster? In this one service?
+
+## Observability signal primer
+
+https://opentelemetry.io/docs/concepts/observability-primer/
+
+- Logs are timestamped messages emitted by services or other components.
+- Metrics are aggregations over time of measurements of your infrastructure or application.
+- (Distributed) traces describe operations within and across services, and their causal relations.
+
+.image apm_trace.png _ 600
+
+## What is OpenTelemetry?
+
+.image opentelemetry-horizontal-color.svg
+
+- "High-quality, ubiquitous, and portable telemetry to enable effective observability"
+- Second most active CNCF project behind Kubernetes
+- Distributed tracing, metrics, logs, and profiling
+
+## OpenTelemetry Components
+
+.image otel-diagram.svg _ 500
+
+- OpenTelemetry Collector -- written in Go!
+- OpenTelemetry Protocol (OTLP)
+- OpenTelemetry SDKs and instrumentation modules for major languages, including Go
+
+: Vendor-specific backends (Elastic, Datadog, Instana, ...)
+
+## OpenTelemetry for Go
+
+- API + SDK for distributed tracing and metrics
+  - Highly modular, import just what you need
+- Instrumentation and bridges to third-party libraries/APIs
+  - e.g. net/http, database/sql, grpc-go, sarama, ...
+
+```
+import (
+	// From github.com/open-telemetry/opentelemetry-go
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+
+	// From github.com/open-telemetry/opentelemetry-go-contrib
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
+	// Third-party instrumentation libraries
+	"github.com/XSAM/otelsql"
+)
+```
+
+: Logs integration in design, current plan is to only bridge to existing logs APIs
+: Profiling is in the process of being added to the project
+
+## Instrumentation included
+
+.image google_cloud_go_otel.png _ 800
+
+: Long term vision is for libraries to be instrumented with OTel directly
+
+## Automatic instrumentation
+
+.image ebpf_logo_color_on_white-2-300x108.png
+
+eBPF-based auto instrumentation (alpha)
+
+See [https://github.com/open-telemetry/opentelemetry-go-instrumentation](https://github.com/open-telemetry/opentelemetry-go-instrumentation)
+
+```
+sudo OTEL_GO_AUTO_TARGET_EXE=/home/bin/service_executable \
+     OTEL_SERVICE_NAME=my_service \
+     OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+     ./otel-go-instrumentation
+```
+
+## Instrumenting Go code with OpenTelemetry
+
+1. Instrument your code with tracing and/or metrics
+2. Initialise the tracing and/or metrics SDK to capture and export the data
+3. Use context everywhere! Critical to context propagation and correlation.
+
+## Tracing instrumentation
+
+Middleware:
+
+```
+package otelhttp
+
+func NewMiddleware(operation string, opts ...Option) func(http.Handler) http.Handler
+```
+
+Manual instrumentation:
+
+```
+func doWork(ctx context.Context) error {
+    ctx, span := tracer.Start(ctx, "doWork")
+    defer span.End()
+
+    // ...
+
+    if err := subcontract(ctx); err != nil {
+        span.RecordError(err)
+        return err
+    }
+    return nil
+}
+```
+
+: Look mum, no vendors:
+
+## Metrics instrumentation (counters)
+
+Counters updated synchronously, e.g. when an HTTP request is received.
+
+```
+meter := otel.Meter("my/package/name")
+rollCounter, err := meter.Int64Counter("dice_rolls")
+if err != nil {
+        panic(err)
+}
+
+for range 100 {
+        roll := 1 + rand.Intn(6)
+        rollCounter.Add(ctx, 1, metric.WithAttributes(
+                // include the value as a dimension
+                attribute.Int("value", roll),
+        ))
+}
+```
+
+## Metrics instrumentation (gauges)
+
+Gauge measurements are taken asynchronously, e.g. on a schedule.
+
+```
+meter.Float64ObservableGauge(
+        "temperature",
+        metric.WithUnit("Cel"), // degrees Celsius
+        metric.WithFloat64Callback(func(ctx context.Context, o metric.Float64Observer) error {
+                return filepath.WalkDir("/sys/class/thermal", func(path string, d fs.DirEntry, err error) error {
+                        var tempC float64
+                        var thermalZoneType string
+                        // (code left as exercise to reader)
+                        o.Observe(tempC, metric.WithAttributes(attribute.String("type", thermalZoneType)))
+                        return nil
+                })
+        }),
+)
+```
+
+## Metrics instrumentation (histograms)
+
+```
+latencyHistogram, _ := meter.Float64Histogram(
+        "latency_distribution",
+        metric.WithUnit("s"), // seconds
+)
+
+for range 100 {
+        before := time.Now()
+        // (do some work)
+        taken := time.Since(before)
+        latencyHistogram.Record(ctx, taken.Seconds())
+}
+```
+
+## Initialise the tracing SDK
+
+.code main.go /BEGIN INIT TRACER PROVIDER/,/END INIT TRACER PROVIDER/
+
+## Initialise the metrics SDK
+
+```
+// meter is initially a no-op, hot-swapped when a global MeterProvider is
+// registered by initMeterProvider.
+var meter = otel.Meter("my/package/name")
+
+func initMeterProvider() {
+	// Set up a meter provider, exporting both to stdout and as OTLP.
+	const interval = 10 * time.Second
+	stdoutExporter, _ := stdoutmetric.New()
+	otlpExporter, _ := otlpmetricgrpc.New(context.Background())
+	meterProvider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(
+			sdkmetric.NewPeriodicReader(stdoutExporter, sdkmetric.WithInterval(interval)),
+		),
+		sdkmetric.WithReader(
+			sdkmetric.NewPeriodicReader(
+				otlpExporter,
+				sdkmetric.WithInterval(interval),
+			),
+		),
+	)
+	otel.SetMeterProvider(meterProvider)
+}
+```
+
+## Demo time
+
+- HTTP service exposes HTTP route `GET /roll/:dice`, RPG dice notation.
+- [otel-cli](https://github.com/equinix-labs/otel-cli) can be used to
+  create spans and inject the `Traceparent` header into `curl`
+- Traces and metrics sent as OTLP to Elastic Cloud.
+  Easy to swap to any other vendor.
+
+```
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://<deployment>.apm.<region>.cloud.es.io:443
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <secret token>"
+
+OTEL_RESOURCE_ATTRIBUTES=service.name=dice-server go run ./code
+
+otel-cli exec --name 'curl-dice-server' -- \
+	bash -c 'curl -v -H Traceparent:$TRACEPARENT http://localhost:8080/roll/127d20'
+```
