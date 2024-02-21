@@ -1,6 +1,6 @@
 module oteldemo
 
-go 1.21.1
+go 1.22
 
 require (
 	github.com/labstack/echo/v4 v4.11.4
